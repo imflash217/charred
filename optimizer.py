@@ -1,7 +1,14 @@
 import optax
 
 
-def setup_optimizer(learning_rate, adam_beta1, adam_beta2, adam_epsilon, adam_weight_decay, max_grad_norm):
+def setup_optimizer(
+    learning_rate,
+    adam_beta1,
+    adam_beta2,
+    adam_epsilon,
+    adam_weight_decay,
+    max_grad_norm,
+):
     constant_scheduler = optax.constant_schedule(learning_rate)
 
     adamw = optax.adamw(

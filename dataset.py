@@ -1,77 +1,180 @@
+from batch import setup_dataloader
+from datasets import load_dataset
 import os
-
+from PIL import Image
 import requests
 from datasets import load_dataset
 from PIL import Image
 from torchvision import transforms
 
 
-def _dataset_transforms(tokenizer, image_transforms, example):
-    caption = example["caption"]
-    image_url = example["url"]
-    watermark_probability = example["pwatermark"]
+from torchvision import transforms
 
-    filter_pass = (
+from transformers import ByT5Tokenizer
+
+
+def _prefilter(sample):
+    image_url = sample["URL"]
+    caption = sample["TEXT"]
+    watermark_probability = sample["pwatermark"]
+    unsafe_probability = sample["punsafe"]
+    hash = sample["hash"]
+
+    return (
         caption is not None
         and isinstance(caption, str)
         and image_url is not None
         and isinstance(image_url, str)
+        and watermark_probability is not None
         and watermark_probability < 0.6
+        and unsafe_probability is not None
+        and unsafe_probability < 1.0
+        and hash is not None
     )
 
-    example["pass"] = filter_pass
 
-    if filter_pass:
-        image_bytes = requests.get(image_url, stream=True).raw
+def _download_image(sample):
+    is_ok = False
 
-        # TODO: if checksum fails, skip this entry and filter out later
-        # checksum = hashlib.md5(image_bytes).hexdigest() == example["hash"]
+    image_url = sample["URL"]
 
-        # append image data
-        # TODO: apply and cache image embbedings here instead of in the training loop (and don't keep the pixel data)
-        example["pixel_values"] = image_transforms(Image.open(image_bytes).convert("RGB"))
+    cached_image_image_file_path = os.path.join(
+        "/data/image-cache", "%s.jpg" % hex(sample["hash"])
+    )
 
-        # append tokenized text
-        # TODO: apply and cache text embbedings here instead of in the training loop (and don't keep the tokenized text)
-        example["input_ids"] = tokenizer(
-            caption, max_length=tokenizer.model_max_length, padding="do_not_pad", truncation=True
-        ).input_ids
+    if os.path.isfile(cached_image_image_file_path):
+        pass
+    else:
+        try:
+            # get image data from url
+            image_bytes = requests.get(image_url, stream=True, timeout=5).raw
 
-    return example
+            if image_bytes is not None:
+                pil_image = Image.open(image_bytes)
+
+                if pil_image.mode == "RGB":
+                    pil_rgb_image = pil_image
+
+                else:
+                    # Deal with non RGB images
+                    if pil_image.mode == "RGBA":
+                        pil_rgba_image = pil_rgb_image
+                    else:
+                        pil_rgba_image = pil_rgb_image.convert("RGBA")
+
+                    pil_rgb_image = Image.alpha_composite(
+                        Image.new("RGBA", pil_image.size, (255, 255, 255)),
+                        pil_rgba_image,
+                    ).convert("RGB")
+
+                is_ok = True
+
+                pil_rgb_image.save(cached_image_image_file_path)
+
+        except:
+            with open(cached_image_image_file_path, mode="a"):
+                pass
+
+        # save image to disk but do not catch exception. this has to fail because otherwise the mapper will run forever
+        if is_ok:
+            pil_rgb_image.save(cached_image_image_file_path)
+
+    return is_ok
 
 
-def dataset_transforms(tokenizer, resolution):
-    # TODO: replace with https://jax.readthedocs.io/en/latest/jax.image.html
+def _filter_out_unprocessed(sample):
+    cached_image_image_file_path = os.path.join(
+        "/data/image-cache", "%s.jpg" % hex(sample["hash"])
+    )
+
+    if (
+        os.path.isfile(cached_image_image_file_path)
+        and os.stat(cached_image_image_file_path).st_size > 0
+    ):
+        try:
+            Image.open(cached_image_image_file_path)
+
+            return True
+
+        except:
+            pass
+
+    return False
+
+
+def get_compute_intermediate_values_lambda():
+    tokenizer = ByT5Tokenizer()
+
     image_transforms = transforms.Compose(
         [
-            transforms.Resize(resolution, interpolation=transforms.InterpolationMode.LANCZOS),
-            transforms.RandomCrop(resolution),
+            transforms.Resize(512, interpolation=transforms.InterpolationMode.LANCZOS),
+            transforms.CenterCrop(512),
             transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
         ]
     )
 
-    return lambda example: _dataset_transforms(tokenizer, image_transforms, example)
+    def __get_pixel_values(image_hash):
+        # compute file name
+        cached_image_image_file_path = os.path.join(
+            "/data/image-cache", "%s.jpg" % hex(image_hash)
+        )
+
+        # get image data from cache
+        pil_rgb_image = Image.open(cached_image_image_file_path)
+
+        transformed_image = image_transforms(pil_rgb_image)
+
+        return transformed_image
+
+    def __compute_intermediate_values_lambda(samples):
+        samples["input_ids"] = tokenizer(
+            text=samples["TEXT"],
+            max_length=1024,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        ).input_ids
+
+        samples["pixel_values"] = [
+            __get_pixel_values(image_hash) for image_hash in samples["hash"]
+        ]
+
+        return samples
+
+    return __compute_intermediate_values_lambda
 
 
-def setup_dataset(max_train_steps, cache_dir, resolution, tokenizer):
-    # TODO: make sure we use the datatsets library with JAX : https://huggingface.co/docs/datasets/use_with_jax
+def setup_dataset(n):
     # loading the dataset
     dataset = (
         load_dataset(
-            path="laion/laion-high-resolution",
-            cache_dir=os.path.join(cache_dir, "laion-high-resolution"),
-            split="train",
-            streaming=True,
+            "parquet",
+            data_files={
+                # "train": "/data/laion-high-resolution-filtered-shuffled.snappy.parquet",
+                # "train": "/data/laion-high-resolution-filtered-shuffled-processed-split.zstd.parquet",
+                # "train": "/data/laion-high-resolution-filtered-shuffled-processed-split-byt5-vae.zstd.parquet",
+                "train": "/data/laion-high-resolution-filtered-shuffled-validated-10k.zstd.parquet",
+            },
+            split="train[:%d]" % n,
+            cache_dir="/data/cache",
+            num_proc=4,
         )
-        .shuffle(seed=27, buffer_size=10_000)
-        .take(n=max_train_steps)
+        .with_format("torch")
         .map(
-            transforms=dataset_transforms(tokenizer, resolution),
-            remove_columns=[],
-            batched=False,  # TODO: maybe batch this?
+            get_compute_intermediate_values_lambda(),
+            batched=True,
+            batch_size=16,
+            num_proc=4,
         )
-        .filter(filter=lambda example: example["pass"])
+        .select_columns(["input_ids", "pixel_values"])
     )
 
     return dataset
+
+
+if __name__ == "__main__":
+    dataset = setup_dataset(64)
+
+    dataloader = setup_dataloader(dataset, 16)
+    for batch in dataloader:
+        print(batch["pixel_values"].shape)

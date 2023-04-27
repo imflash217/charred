@@ -1,2 +1,6 @@
 __pycache__
 .cache
+dataset-cache
+wandb
+Pipfile.lock
+Pipfile

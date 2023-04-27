@@ -1,61 +1,24 @@
 import jax
 import jax.numpy as jnp
 
+from diffusers import FlaxDDPMScheduler
 
-def loss_fn(
-    vae,
-    vae_params,
-    batch,
+
+def get_vae_latent_distribution_samples(
+    image_latent_distribution_sampling,
     sample_rng,
+    scaling_factor,
     noise_scheduler,
     noise_scheduler_state,
-    text_encoder,
-    text_encoder_params,
-    unet,
 ):
-    return lambda state_params: _loss_fn(
-        state_params,
-        vae,
-        vae_params,
-        batch,
-        sample_rng,
-        noise_scheduler,
-        noise_scheduler_state,
-        text_encoder,
-        text_encoder_params,
-        unet,
+    # (NHWC) -> (NCHW)
+    latents = (
+        jnp.transpose(image_latent_distribution_sampling, (0, 3, 1, 2)) * scaling_factor
     )
-
-
-def _loss_fn(
-    state_params,
-    vae,
-    vae_params,
-    batch,
-    sample_rng,
-    noise_scheduler,
-    noise_scheduler_state,
-    text_encoder,
-    text_encoder_params,
-    unet,
-):
-    # Get the image and text embeddings
-    # TODO: use cached embeddings instead
-    vae_outputs = vae.apply({"params": vae_params}, batch["pixel_values"], deterministic=True, method=vae.encode)
-    encoder_hidden_states = text_encoder(
-        batch["input_ids"],
-        params=text_encoder_params,
-        train=False,
-    )[0]
-
-    # Convert image embeddings to latent space
-    latent_samples = vae_outputs.latent_dist.sample(sample_rng)
-    latents_transposed = jnp.transpose(latent_samples, (0, 3, 1, 2))  # (NHWC) -> (NCHW)
-    latents = latents_transposed * vae.config.scaling_factor
 
     # Sample noise that we'll add to the latents
     noise_rng, timestep_rng = jax.random.split(sample_rng)
-    noise = jax.random.normal(noise_rng, latents.shape)
+    noisy_image_target = jax.random.normal(noise_rng, latents.shape)
 
     # Sample a random timestep for each image
     timesteps = jax.random.randint(
@@ -67,12 +30,72 @@ def _loss_fn(
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
-    noisy_latents = noise_scheduler.add_noise(noise_scheduler_state, latents, noise, timesteps)
+    noisy_latents = noise_scheduler.add_noise(
+        noise_scheduler_state, latents, noisy_image_target, timesteps
+    )
 
-    # Predict the noise residual and compute loss
-    model_pred = unet.apply(
-        {"params": state_params}, noisy_latents, timesteps, encoder_hidden_states, train=True
-    ).sample
+    return noisy_latents, timesteps, noisy_image_target
 
-    # Compute loss from noisy target
-    return ((noise - model_pred) ** 2).mean()
+
+def get_compute_loss_lambda(
+    text_encoder,
+    text_encoder_params,
+    vae,
+    vae_params,
+    unet,
+    batch,
+    sample_rng,
+):
+    noise_scheduler = FlaxDDPMScheduler(
+        beta_start=0.00085,
+        beta_end=0.012,
+        beta_schedule="scaled_linear",
+        num_train_timesteps=1000,
+    )
+
+    noise_scheduler_state = noise_scheduler.create_state()
+
+    def __compute_loss_lambda(
+        state_params,
+    ):
+        # Get the text embedding
+        text_encoder_hidden_states = text_encoder(
+            batch["input_ids"],
+            params=text_encoder_params,
+            train=False,
+        )[0]
+
+        # Get the image embedding
+        vae_outputs = vae.apply(
+            {"params": vae_params},
+            batch["pixel_values"],
+            deterministic=True,
+            method=vae.encode,
+        )
+        # vae_outputs.latent_dist.mode() # <--- can this be cached ?
+        image_latent_distribution_sampling = vae_outputs.latent_dist.sample(sample_rng)
+        (
+            image_sampling_noisy_input,
+            image_sampling_timesteps,
+            image_sampling_noisy_target,
+        ) = get_vae_latent_distribution_samples(
+            image_latent_distribution_sampling,
+            sample_rng,
+            vae.config.scaling_factor,
+            noise_scheduler,
+            noise_scheduler_state,
+        )
+
+        # Predict the noise residual and compute loss
+        model_pred = unet.apply(
+            {"params": state_params},
+            image_sampling_noisy_input,
+            image_sampling_timesteps,
+            text_encoder_hidden_states,
+            train=True,
+        ).sample
+
+        # Compute loss from noisy target
+        return ((image_sampling_noisy_target - model_pred) ** 2).mean()
+
+    return __compute_loss_lambda

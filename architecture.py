@@ -1,18 +1,20 @@
+import os
+
 import jax.numpy as jnp
+
+from transformers import FlaxT5ForConditionalGeneration, set_seed
+
 from diffusers import FlaxAutoencoderKL, FlaxUNet2DConditionModel
-from transformers import ByT5Tokenizer, FlaxT5EncoderModel, set_seed
 
 
 def setup_model(
     seed,
     mixed_precision,
-    pretrained_text_encoder_model_name_or_path,
-    pretrained_text_encoder_model_revision,
-    pretrained_diffusion_model_name_or_path,
-    pretrained_diffusion_model_revision,
+    load_pretrained,
+    output_dir,
+    training_from_scratch_rng_params,
 ):
-    if seed is not None:
-        set_seed(seed)
+    set_seed(seed)
 
     if mixed_precision == "fp16":
         weight_dtype = jnp.float16
@@ -22,22 +24,86 @@ def setup_model(
         weight_dtype = jnp.float32
 
     # Load models and create wrapper for stable diffusion
-    tokenizer = ByT5Tokenizer()
 
-    text_encoder = FlaxT5EncoderModel.from_pretrained(
-        pretrained_text_encoder_model_name_or_path, revision=pretrained_text_encoder_model_revision, dtype=weight_dtype
+    language_model = FlaxT5ForConditionalGeneration.from_pretrained(
+        "/data/byt5-base",
+        dtype=weight_dtype,
     )
+
     vae, vae_params = FlaxAutoencoderKL.from_pretrained(
-        pretrained_diffusion_model_name_or_path,
-        revision=pretrained_diffusion_model_revision,
-        subfolder="vae",
-        dtype=weight_dtype,
-    )
-    unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(
-        pretrained_diffusion_model_name_or_path,
-        revision=pretrained_diffusion_model_revision,
-        subfolder="unet",
+        "/data/stable-diffusion-2-1-vae",
         dtype=weight_dtype,
     )
 
-    return tokenizer, text_encoder, vae, vae_params, unet, unet_params
+    if load_pretrained:
+        # find latest epoch output
+        pretrained_dir = [
+            dir
+            for dir in os.listdir(output_dir).sort(reverse=True)
+            if os.path.isdir(os.path.join(output_dir, dir))
+        ][0]
+
+        unet, unet_params = FlaxUNet2DConditionModel.from_pretrained(
+            pretrained_dir,
+            dtype=weight_dtype,
+        )
+
+        print("loaded unet from pre-trained...")
+    else:
+        unet = FlaxUNet2DConditionModel.from_config(
+            config={
+                "attention_head_dim": [5, 10, 20, 20],
+                "block_out_channels": [320, 640, 1280, 1280],
+                "cross_attention_dim": 1536,
+                "down_block_types": [
+                    "CrossAttnDownBlock2D",
+                    "CrossAttnDownBlock2D",
+                    "CrossAttnDownBlock2D",
+                    "DownBlock2D",
+                ],
+                "dropout": 0.0,
+                "flip_sin_to_cos": True,
+                "freq_shift": 0,
+                "in_channels": 4,
+                "layers_per_block": 2,
+                "only_cross_attention": False,
+                "out_channels": 4,
+                "sample_size": 64,
+                "up_block_types": [
+                    "UpBlock2D",
+                    "CrossAttnUpBlock2D",
+                    "CrossAttnUpBlock2D",
+                    "CrossAttnUpBlock2D",
+                ],
+                "use_linear_projection": True,
+            },
+            dtype=weight_dtype,
+        )
+        unet_params = unet.init_weights(rng=training_from_scratch_rng_params)
+        print("training unet from scratch...")
+
+    return (
+        language_model.encode,
+        language_model.params,
+        vae,
+        vae_params,
+        unet,
+        unet_params,
+    )
+
+
+if __name__ == "__main__":
+    language_model = FlaxT5ForConditionalGeneration.from_pretrained(
+        "google/byt5-base",
+        dtype=jnp.float32,
+    )
+
+    language_model.save_pretrained("/data/byt5-base")
+
+    vae, vae_params = FlaxAutoencoderKL.from_pretrained(
+        "flax/stable-diffusion-2-1",
+        subfolder="vae",
+        dtype=jnp.float32,
+    )
+
+    vae.save_pretrained("/data/stable-diffusion-2-1-vae", params=vae_params)

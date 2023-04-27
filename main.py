@@ -1,5 +1,9 @@
+import os
+
 # jax/flax
+import jax
 from flax import jax_utils
+from flax.core.frozen_dict import unfreeze
 from flax.training import train_state
 
 from architecture import setup_model
@@ -7,24 +11,37 @@ from architecture import setup_model
 # internal code
 from args import parse_args
 from optimizer import setup_optimizer
-from repository import create_repository
 from training_loop import training_loop
+from logging import wandb_close, wandb_init
 
 
 def main():
     args = parse_args()
 
-    repo_id = create_repository(args.output_dir, args.push_to_hub, args.hub_model_id, args.hub_token)
+    output_dir = args.output_dir
 
-    # Pipeline models setup
-    tokenizer, text_encoder, vae, vae_params, unet, unet_params = setup_model(
-        args.seed,
+    load_pretrained = os.path.exists(output_dir) and os.path.isdir(output_dir)
+
+    # Setup WandB for logging & tracking
+    log_wandb = args.log_wandb
+    if log_wandb:
+        wandb_init(args)
+
+    # init random number generator
+    seed = args.seed
+    seed_rng = jax.random.PRNGKey(seed)
+    rng, training_from_scratch_rng_params = jax.random.split(seed_rng)
+    print("random generator setup...")
+
+    # Pretrained/freezed and training model setup
+    text_encoder, text_encoder_params, vae, vae_params, unet, unet_params = setup_model(
+        seed,
         args.mixed_precision,
-        args.pretrained_text_encoder_model_name_or_path,
-        args.pretrained_text_encoder_model_revision,
-        args.pretrained_diffusion_model_name_or_path,
-        args.pretrained_diffusion_model_revision,
+        load_pretrained,
+        output_dir,
+        training_from_scratch_rng_params,
     )
+    print("models setup...")
 
     # Optimization & scheduling setup
     optimizer = setup_optimizer(
@@ -35,35 +52,42 @@ def main():
         args.adam_weight_decay,
         args.max_grad_norm,
     )
+    print("optimizer setup...")
 
-    # State setup
-    # TODO: find out why we are passing params=unet_params. Only for shape?
-    state = train_state.TrainState.create(apply_fn=unet.__call__, params=unet_params, tx=optimizer)
-    replicated_state = jax_utils.replicate(state)
-    replicated_text_encoder_params = jax_utils.replicate(text_encoder.params)
+    # Training state setup
+    unet_training_state = train_state.TrainState.create(
+        apply_fn=unet,
+        params=unfreeze(unet_params),
+        tx=optimizer,
+    )
+    print("training state initialized...")
+
+    # JAX device data replication
+    replicated_state = jax_utils.replicate(unet_training_state)
+    replicated_text_encoder_params = jax_utils.replicate(text_encoder_params)
     replicated_vae_params = jax_utils.replicate(vae_params)
+    print("states & params replicated to TPUs...")
 
     # Train!
+    print("Training loop init...")
     training_loop(
-        tokenizer,
         text_encoder,
         replicated_text_encoder_params,
         vae,
         replicated_vae_params,
         unet,
         replicated_state,
-        args.cache_dir,
-        args.resolution,
-        args.seed,
+        rng,
         args.max_train_steps,
         args.num_train_epochs,
         args.train_batch_size,
-        args.output_dir,
-        args.dataset_output_dir,
-        args.push_to_hub,
-        repo_id,
-        log_wandb=args.log_wandb,
+        output_dir,
+        log_wandb,
     )
+    print("Training loop done...")
+
+    if log_wandb:
+        wandb_close()
 
 
 if __name__ == "__main__":

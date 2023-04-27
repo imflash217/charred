@@ -1,20 +1,22 @@
 import os
-from pathlib import Path
+
+from threading import Thread
+
+# hugging face
+from huggingface_hub import create_repo, upload_folder
 
 import jax
 from diffusers import FlaxPNDMScheduler, FlaxStableDiffusionPipeline
 
-# hugging face
-from huggingface_hub import create_repo, upload_folder
-from transformers import CLIPImageProcessor
 
-
-def create_repository(output_dir, push_to_hub, hub_model_id, hub_token):
+def create_repository(output_dir, hub_model_id):
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
 
-    if push_to_hub:
-        repo_id = create_repo(repo_id=hub_model_id or Path(output_dir).name, exist_ok=True, token=hub_token).repo_id
+    repo_id = create_repo(
+        repo_id=hub_model_id,
+        exist_ok=True,
+    ).repo_id
 
     return repo_id
 
@@ -23,35 +25,56 @@ def get_params_to_save(params):
     return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
 
 
-def save_to_repository(
-    output_dir, push_to_hub, tokenizer, text_encoder, text_encoder_params, vae, vae_params, unet, repo_id, state
+def save_to_local_directory(
+    output_dir,
+    unet,
+    unet_params,
 ):
-    scheduler = FlaxPNDMScheduler(
-        beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", skip_prk_steps=True
+    print("saving trained weights...")
+    unet.save_pretrained(
+        save_directory=output_dir,
+        params=get_params_to_save(unet_params),
     )
+    print("trained weights saved...")
 
-    pipeline = FlaxStableDiffusionPipeline(
-        text_encoder=text_encoder,
-        vae=vae,
-        unet=unet,
-        tokenizer=tokenizer,
-        scheduler=scheduler,
-        feature_extractor=CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32"),
+
+def save_to_repository(
+    output_dir,
+    unet,
+    unet_params,
+    repo_id,
+):
+    print("saving trained weights...")
+    unet.save_pretrained(
+        save_directory=output_dir,
+        params=unet_params,
     )
+    print("trained weights saved...")
 
-    pipeline.save_pretrained(
-        output_dir,
-        params={
-            "text_encoder": get_params_to_save(text_encoder_params),
-            "vae": get_params_to_save(vae_params),
-            "unet": get_params_to_save(state.params),
-        },
-    )
-
-    if push_to_hub:
-        upload_folder(
-            repo_id=repo_id,
-            folder_path=output_dir,
-            commit_message="End of training",
-            ignore_patterns=["step_*", "epoch_*"],
+    Thread(
+        target=lambda: upload_to_repository(
+            repo_id,
+            output_dir,
+            "End of training epoch.",
         )
+    ).start()
+
+
+def upload_to_repository(
+    output_dir,
+    repo_id,
+    commit_message,
+):
+    upload_folder(
+        repo_id=repo_id,
+        folder_path=output_dir,
+        commit_message=commit_message,
+    )
+
+
+if __name__ == "__main__":
+    upload_to_repository(
+        "/data/output/000170",
+        "character-aware-diffusion/charred",
+        "Fixed output format to unreplicated JAX weights.",
+    )
