@@ -1,4 +1,5 @@
-jax[cuda12_local]
+# jax[cuda12_local]
+jax[cpu]
 flax
 optax
 diffusers
