@@ -74,7 +74,7 @@ def upload_to_repository(
 
 if __name__ == "__main__":
     upload_to_repository(
-        "/data/output/000270",
+        "/data/output/000540",
         "character-aware-diffusion/charred",
-        "Latest training epoch version as of Apr 26 8PM EST.",
+        "Latest training epoch version as of Apr 27 3PM EST.",
     )
