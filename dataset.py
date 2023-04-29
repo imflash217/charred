@@ -153,7 +153,8 @@ def setup_dataset(n):
                 # "train": "/data/laion-high-resolution-filtered-shuffled.snappy.parquet",
                 # "train": "/data/laion-high-resolution-filtered-shuffled-processed-split.zstd.parquet",
                 # "train": "/data/laion-high-resolution-filtered-shuffled-processed-split-byt5-vae.zstd.parquet",
-                "train": "/data/laion-high-resolution-filtered-shuffled-validated-10k.zstd.parquet",
+                # "train": "/data/laion-high-resolution-filtered-shuffled-validated-10k.zstd.parquet",
+                "train": "/data/laion-high-resolution-1M.zstd.parquet",
             },
             split="train[:%d]" % n,
             cache_dir="/data/cache",
@@ -172,9 +173,32 @@ def setup_dataset(n):
     return dataset
 
 
-if __name__ == "__main__":
-    dataset = setup_dataset(64)
+def prepare_1m_dataset():
+    # Gives 1267072 samples to be exact
+    (
+        load_dataset(
+            "laion/laion-high-resolution",
+            split="train",
+            cache_dir="/data/cache",
+        )
+        .with_format("torch")
+        .select_columns(["TEXT", "hash"])
+        .filter(
+            function=_filter_out_unprocessed,
+            num_proc=96,
+        )
+        .to_parquet(
+            "/data/laion-high-resolution-1M.zstd.parquet",
+            batch_size=128,
+            compression="ZSTD",
+        )
+    )
 
-    dataloader = setup_dataloader(dataset, 16)
-    for batch in dataloader:
-        print(batch["pixel_values"].shape)
+
+if __name__ == "__main__":
+    prepare_1m_dataset()
+    # dataset = setup_dataset(64)
+
+    # dataloader = setup_dataloader(dataset, 16)
+    # for batch in dataloader:
+    #     print(batch["pixel_values"].shape)

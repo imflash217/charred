@@ -1,12 +1,8 @@
 import os
-
 from threading import Thread
 
 # hugging face
 from huggingface_hub import create_repo, upload_folder
-
-import jax
-from diffusers import FlaxPNDMScheduler, FlaxStableDiffusionPipeline
 
 
 def create_repository(output_dir, hub_model_id):
@@ -21,10 +17,6 @@ def create_repository(output_dir, hub_model_id):
     return repo_id
 
 
-def get_params_to_save(params):
-    return jax.device_get(jax.tree_util.tree_map(lambda x: x[0], params))
-
-
 def save_to_local_directory(
     output_dir,
     unet,
@@ -33,7 +25,7 @@ def save_to_local_directory(
     print("saving trained weights...")
     unet.save_pretrained(
         save_directory=output_dir,
-        params=get_params_to_save(unet_params),
+        params=unet_params,
     )
     print("trained weights saved...")
 
@@ -74,7 +66,7 @@ def upload_to_repository(
 
 if __name__ == "__main__":
     upload_to_repository(
-        "/data/output/000540",
+        "/data/output/000810",
         "character-aware-diffusion/charred",
-        "Latest training epoch version as of Apr 27 3PM EST.",
+        "Latest training epoch version as of Apr 28 11:16PM EST.",
     )
